@@ -13,6 +13,7 @@ const (
 	PassThroughPacer PacerType = iota
 	NoQueuePacer
 	LeakyBucketPacer
+	DynamicQueuePacer
 )
 
 type pacerFactoryParams struct {
@@ -79,6 +80,8 @@ func (f *PacerFactory) NewPacer() (Pacer, error) {
 		return NewNoQueue(f.params.Logger), nil
 	case LeakyBucketPacer:
 		return NewPacerLeakyBucket(f.params.SendInterval, f.params.Bitrate, f.params.MaxLatency, f.params.Logger), nil
+	case DynamicQueuePacer:
+		return NewDynamicQueue(f.params.Logger, 10_000, int64(f.params.MaxLatency)), nil
 	default:
 		return nil, fmt.Errorf("unknown pacer type: %v", f.params.PacerType)
 	}
