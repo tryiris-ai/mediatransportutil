@@ -43,6 +43,7 @@ type DynamicQueue struct {
 	totalPacketsSent    int64
 	lastReportTime      time.Time
 	estimatedIntervalMs float64
+	lastSendTime        time.Time
 }
 
 func NewDynamicQueue(logger logger.Logger, maxQueueSize int, deadlineMs int64) *DynamicQueue {
@@ -54,6 +55,7 @@ func NewDynamicQueue(logger logger.Logger, maxQueueSize int, deadlineMs int64) *
 		deadlineMs:          deadlineMs,
 		lastReportTime:      time.Now(),
 		estimatedIntervalMs: 1.0, // Initial estimate
+		lastSendTime:        time.Now(),
 	}
 	d.packets.SetBaseCap(512)
 	return d
@@ -85,8 +87,16 @@ func (d *DynamicQueue) Enqueue(p *Packet) {
 	d.lock.Lock()
 	defer d.lock.Unlock()
 	if d.packets.Len() >= d.maxQueueSize {
-		slog.Default().Error("packet dropped", "reason", "queue full")
-		return
+		// Force send the oldest packet to make space
+		if d.packets.Len() > 0 {
+			qp := d.packets.PopFront()
+			size := qp.p.Header.MarshalSize() + len(qp.p.Payload)
+			d.Base.SendPacket(qp.p)
+			d.totalBytesSent += int64(size)
+			d.totalPacketsSent++
+			d.lastSendTime = time.Now()
+			slog.Default().Warn("forced send to avoid overflow", "queue_size", d.maxQueueSize)
+		}
 	}
 	qp := &queuedPacket{p: p, enqueued: time.Now()}
 	d.packets.PushBack(qp)
@@ -112,11 +122,25 @@ func (d *DynamicQueue) sendWorker() {
 			}
 			continue
 		}
+		currLen := d.packets.Len()
 		d.lock.RUnlock()
 
-		defaultWait := time.Duration(math.Max(1, d.estimatedIntervalMs)) * time.Millisecond
+		pressure := float64(currLen) / float64(d.maxQueueSize)
+		// Adjust interval to fill gaps by increasing rate slightly when pressure is low
+		adjustedIntervalMs := math.Max(1, d.estimatedIntervalMs*(1-pressure*0.5))
+		defaultWait := time.Duration(adjustedIntervalMs) * time.Millisecond
 
-		var wait time.Duration = defaultWait
+		// Calculate tokens based on time since last send
+		now := time.Now()
+		elapsed := now.Sub(d.lastSendTime).Seconds()
+		tokens := int(math.Max(1, elapsed*1000/adjustedIntervalMs)) // Accumulate tokens for burst handling
+
+		var wait time.Duration
+		if pressure > 0.8 || tokens > 1 {
+			wait = 0 // Send immediately under high pressure or with accumulated tokens
+		} else {
+			wait = defaultWait
+		}
 
 		if timer != nil {
 			timer.Stop()
@@ -134,30 +158,38 @@ func (d *DynamicQueue) sendWorker() {
 			}
 		}
 
-		// Send the packet
-		d.lock.Lock()
-		if d.packets.Len() == 0 {
+		// Send multiple packets if tokens allow, to spread bursts
+		sent := 0
+		for sent < tokens && d.packets.Len() > 0 {
+			d.lock.Lock()
+			if d.packets.Len() == 0 {
+				d.lock.Unlock()
+				break
+			}
+			qp := d.packets.PopFront()
 			d.lock.Unlock()
-			continue
+
+			now = time.Now()
+			deadlineDur := time.Duration(d.deadlineMs) * time.Millisecond
+			deadlineTime := qp.enqueued.Add(deadlineDur)
+			if deadlineTime.Before(now) || deadlineTime.Equal(now) {
+				slog.Default().Warn("sending packet past deadline", "latency_ms", now.Sub(qp.enqueued).Milliseconds())
+			}
+
+			size := qp.p.Header.MarshalSize() + len(qp.p.Payload)
+			d.Base.SendPacket(qp.p)
+
+			d.lock.Lock()
+			d.totalBytesSent += int64(size)
+			d.totalPacketsSent++
+			d.lock.Unlock()
+
+			sent++
 		}
-		qp := d.packets.PopFront()
-		d.lock.Unlock()
 
-		now := time.Now()
-		deadlineDur := time.Duration(d.deadlineMs) * time.Millisecond
-		deadlineTime := qp.enqueued.Add(deadlineDur)
-		if deadlineTime.Before(now) || deadlineTime.Equal(now) {
-			slog.Default().Error("packet dropped", "reason", "deadline exceeded")
-			continue
+		if sent > 0 {
+			d.lastSendTime = time.Now()
 		}
-
-		size := qp.p.Header.MarshalSize() + len(qp.p.Payload)
-		d.Base.SendPacket(qp.p)
-
-		d.lock.Lock()
-		d.totalBytesSent += int64(size)
-		d.totalPacketsSent++
-		d.lock.Unlock()
 	}
 }
 
