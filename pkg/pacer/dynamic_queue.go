@@ -116,17 +116,21 @@ func (d *DynamicQueue) sendWorker() {
 		now := time.Now()
 		deadlineDur := time.Duration(d.deadlineMs) * time.Millisecond
 		deadlineTime := qp.enqueued.Add(deadlineDur)
-		intervalMs := math.Max(1, float64(d.deadlineMs)/float64(currLen))
-		defaultWait := time.Duration(intervalMs) * time.Millisecond
+		pressure := float64(currLen) / float64(d.maxQueueSize)
+
+		// Calculate ideal interval based on deadline and adjust with pressure
+		idealIntervalMs := float64(d.deadlineMs) / float64(currLen)         // Target interval for even distribution
+		adjustedIntervalMs := math.Max(1.0, idealIntervalMs/(1.0+pressure)) // Reduce interval under pressure, but ensure minimum
+		defaultWait := time.Duration(adjustedIntervalMs) * time.Millisecond
 
 		var wait time.Duration
 		if deadlineTime.Before(now) || deadlineTime.Equal(now) {
-			wait = 0
+			wait = 0 // Send immediately if deadline is hit
 		} else {
 			timeUntilDeadline := deadlineTime.Sub(now)
 			wait = defaultWait
 			if timeUntilDeadline < defaultWait {
-				wait = timeUntilDeadline
+				wait = timeUntilDeadline // Respect deadline but use minimum spacing
 			}
 		}
 
@@ -146,7 +150,7 @@ func (d *DynamicQueue) sendWorker() {
 			}
 		}
 
-		// send the packet
+		// Send the packet
 		d.lock.Lock()
 		if d.packets.Len() == 0 {
 			d.lock.Unlock()
