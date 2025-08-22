@@ -32,25 +32,28 @@ type queuedPacket struct {
 
 type DynamicQueue struct {
 	*Base
-	logger         logger.Logger
-	lock           sync.RWMutex
-	packets        deque.Deque[*queuedPacket]
-	wake           chan struct{}
-	isStopped      bool
-	maxQueueSize   int
-	deadlineMs     int64
-	totalBytesSent int64
-	lastReportTime time.Time
+	logger              logger.Logger
+	lock                sync.RWMutex
+	packets             deque.Deque[*queuedPacket]
+	wake                chan struct{}
+	isStopped           bool
+	maxQueueSize        int
+	deadlineMs          int64
+	totalBytesSent      int64
+	totalPacketsSent    int64
+	lastReportTime      time.Time
+	estimatedIntervalMs float64
 }
 
 func NewDynamicQueue(logger logger.Logger, maxQueueSize int, deadlineMs int64) *DynamicQueue {
 	d := &DynamicQueue{
-		Base:           NewBase(logger),
-		logger:         logger,
-		wake:           make(chan struct{}, 1),
-		maxQueueSize:   maxQueueSize,
-		deadlineMs:     deadlineMs,
-		lastReportTime: time.Now(),
+		Base:                NewBase(logger),
+		logger:              logger,
+		wake:                make(chan struct{}, 1),
+		maxQueueSize:        maxQueueSize,
+		deadlineMs:          deadlineMs,
+		lastReportTime:      time.Now(),
+		estimatedIntervalMs: 1.0, // Initial estimate
 	}
 	d.packets.SetBaseCap(512)
 	return d
@@ -109,30 +112,11 @@ func (d *DynamicQueue) sendWorker() {
 			}
 			continue
 		}
-		qp := d.packets.Front()
-		currLen := d.packets.Len()
 		d.lock.RUnlock()
 
-		now := time.Now()
-		deadlineDur := time.Duration(d.deadlineMs) * time.Millisecond
-		deadlineTime := qp.enqueued.Add(deadlineDur)
-		pressure := float64(currLen) / float64(d.maxQueueSize)
+		defaultWait := time.Duration(math.Max(1, d.estimatedIntervalMs)) * time.Millisecond
 
-		// Calculate ideal interval based on deadline and adjust with pressure
-		idealIntervalMs := float64(d.deadlineMs) / float64(currLen)         // Target interval for even distribution
-		adjustedIntervalMs := math.Max(1.0, idealIntervalMs/(1.0+pressure)) // Reduce interval under pressure, but ensure minimum
-		defaultWait := time.Duration(adjustedIntervalMs) * time.Millisecond
-
-		var wait time.Duration
-		if deadlineTime.Before(now) || deadlineTime.Equal(now) {
-			wait = 0 // Send immediately if deadline is hit
-		} else {
-			timeUntilDeadline := deadlineTime.Sub(now)
-			wait = defaultWait
-			if timeUntilDeadline < defaultWait {
-				wait = timeUntilDeadline // Respect deadline but use minimum spacing
-			}
-		}
+		var wait time.Duration = defaultWait
 
 		if timer != nil {
 			timer.Stop()
@@ -156,20 +140,29 @@ func (d *DynamicQueue) sendWorker() {
 			d.lock.Unlock()
 			continue
 		}
-		qp = d.packets.PopFront()
+		qp := d.packets.PopFront()
 		d.lock.Unlock()
+
+		now := time.Now()
+		deadlineDur := time.Duration(d.deadlineMs) * time.Millisecond
+		deadlineTime := qp.enqueued.Add(deadlineDur)
+		if deadlineTime.Before(now) || deadlineTime.Equal(now) {
+			slog.Default().Error("packet dropped", "reason", "deadline exceeded")
+			continue
+		}
 
 		size := qp.p.Header.MarshalSize() + len(qp.p.Payload)
 		d.Base.SendPacket(qp.p)
 
 		d.lock.Lock()
 		d.totalBytesSent += int64(size)
+		d.totalPacketsSent++
 		d.lock.Unlock()
 	}
 }
 
 func (d *DynamicQueue) reportWorker() {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {
 		<-ticker.C
@@ -190,7 +183,17 @@ func (d *DynamicQueue) reportWorker() {
 		slog.Default().Info("pacer report", "pressure_percent", fmt.Sprintf("%.2f", pressure), "estimated_bitrate_bps", fmt.Sprintf("%.2f", bitrate))
 
 		d.lock.Lock()
+		if d.totalPacketsSent > 0 {
+			averagePacketSize := float64(d.totalBytesSent) / float64(d.totalPacketsSent)
+			if averagePacketSize > 0 {
+				packetRate := bitrate / averagePacketSize
+				if packetRate > 0 {
+					d.estimatedIntervalMs = 1000 / packetRate
+				}
+			}
+		}
 		d.totalBytesSent = 0
+		d.totalPacketsSent = 0
 		d.lastReportTime = now
 		d.lock.Unlock()
 	}
