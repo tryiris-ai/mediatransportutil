@@ -15,6 +15,7 @@
 package pacer
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/gammazero/deque"
@@ -30,15 +31,27 @@ type NoQueue struct {
 	packets   deque.Deque[*Packet]
 	wake      chan struct{}
 	isStopped bool
+
+	bufferSize *int
 }
 
-func NewNoQueue(logger logger.Logger) *NoQueue {
-	n := &NoQueue{
-		Base:   NewBase(logger),
-		logger: logger,
-		wake:   make(chan struct{}, 1),
+func NewNoQueue(logger logger.Logger, maxBufferSize int) *NoQueue {
+	var bufferSize *int
+	if maxBufferSize > 0 {
+		bufferSize = &maxBufferSize
 	}
-	n.packets.SetBaseCap(512)
+
+	n := &NoQueue{
+		Base:       NewBase(logger),
+		logger:     logger,
+		wake:       make(chan struct{}, 1),
+		bufferSize: bufferSize,
+	}
+	if bufferSize != nil && *bufferSize < 512 {
+		n.packets.SetBaseCap(*bufferSize)
+	} else {
+		n.packets.SetBaseCap(512)
+	}
 
 	return n
 }
@@ -64,9 +77,13 @@ func (n *NoQueue) Stop() {
 	n.lock.Unlock()
 }
 
-func (n *NoQueue) Enqueue(p *Packet) {
+func (n *NoQueue) Enqueue(p *Packet) error {
 	n.lock.Lock()
 	defer n.lock.Unlock()
+
+	if n.bufferSize != nil && n.packets.Len() >= *n.bufferSize {
+		return fmt.Errorf("pacer buffer full, size=%d", *n.bufferSize)
+	}
 
 	n.packets.PushBack(p)
 	if n.packets.Len() == 1 && !n.isStopped {
@@ -75,6 +92,7 @@ func (n *NoQueue) Enqueue(p *Packet) {
 		default:
 		}
 	}
+	return nil
 }
 
 func (n *NoQueue) sendWorker() {

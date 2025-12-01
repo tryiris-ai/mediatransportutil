@@ -83,7 +83,7 @@ func (d *DynamicQueue) Stop() {
 	d.lock.Unlock()
 }
 
-func (d *DynamicQueue) Enqueue(p *Packet) {
+func (d *DynamicQueue) Enqueue(p *Packet) error {
 	d.lock.Lock()
 	defer d.lock.Unlock()
 	if d.packets.Len() >= d.maxQueueSize {
@@ -104,6 +104,7 @@ func (d *DynamicQueue) Enqueue(p *Packet) {
 	case d.wake <- struct{}{}:
 	default:
 	}
+	return nil
 }
 
 func (d *DynamicQueue) sendWorker() {
