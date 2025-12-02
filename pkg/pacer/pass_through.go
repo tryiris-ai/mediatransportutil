@@ -34,8 +34,9 @@ func (p *PassThrough) Start() {
 func (p *PassThrough) Stop() {
 }
 
-func (p *PassThrough) Enqueue(pkt *Packet) {
+func (p *PassThrough) Enqueue(pkt *Packet) error {
 	p.Base.SendPacket(pkt)
+	return nil
 }
 
 // ------------------------------------------------

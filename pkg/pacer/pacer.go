@@ -55,7 +55,7 @@ func (p *Packet) getPktSize() int {
 
 type Pacer interface {
 	Start()
-	Enqueue(p *Packet)
+	Enqueue(p *Packet) error
 	Stop()
 
 	SetInterval(interval time.Duration)

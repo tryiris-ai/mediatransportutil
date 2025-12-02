@@ -17,17 +17,19 @@ const (
 )
 
 type pacerFactoryParams struct {
-	SendInterval time.Duration
-	Bitrate      int
-	MaxLatency   time.Duration
-	PacerType    PacerType
-	Logger       logger.Logger
+	SendInterval  time.Duration
+	Bitrate       int
+	MaxLatency    time.Duration
+	MaxBufferSize int
+	PacerType     PacerType
+	Logger        logger.Logger
 }
 
 var defaultPacerParams = pacerFactoryParams{
-	SendInterval: 5 * time.Millisecond,
-	Bitrate:      5000000,
-	MaxLatency:   2 * time.Second,
+	SendInterval:  5 * time.Millisecond,
+	Bitrate:       5000000,
+	MaxLatency:    2 * time.Second,
+	MaxBufferSize: 0, // No limit.
 }
 
 type PacerFactoryOpt func(params *pacerFactoryParams)
@@ -47,6 +49,12 @@ func WithBitrate(bitrate int) PacerFactoryOpt {
 func WithMaxLatency(maxLatency time.Duration) PacerFactoryOpt {
 	return func(params *pacerFactoryParams) {
 		params.MaxLatency = maxLatency
+	}
+}
+
+func WithMaxBufferSize(maxBufferSize int) PacerFactoryOpt {
+	return func(params *pacerFactoryParams) {
+		params.MaxBufferSize = maxBufferSize
 	}
 }
 
@@ -77,7 +85,7 @@ func (f *PacerFactory) NewPacer() (Pacer, error) {
 	case PassThroughPacer:
 		return NewPassThrough(f.params.Logger), nil
 	case NoQueuePacer:
-		return NewNoQueue(f.params.Logger), nil
+		return NewNoQueue(f.params.Logger, f.params.MaxBufferSize), nil
 	case LeakyBucketPacer:
 		return NewPacerLeakyBucket(f.params.SendInterval, f.params.Bitrate, f.params.MaxLatency, f.params.Logger), nil
 	case DynamicQueuePacer:

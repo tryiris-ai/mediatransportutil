@@ -15,6 +15,7 @@
 package pacer
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,9 +60,9 @@ func (p *PacerLeakyBucket) Start() {
 	}
 }
 
-func (p *PacerLeakyBucket) Enqueue(pkt *Packet) {
+func (p *PacerLeakyBucket) Enqueue(pkt *Packet) error {
 	if p.isStopped.Load() {
-		return
+		return fmt.Errorf("pacer stopped")
 	}
 
 	pktSize := pkt.getPktSize()
@@ -70,6 +71,7 @@ func (p *PacerLeakyBucket) Enqueue(pkt *Packet) {
 	p.packets.PushBack(pkt)
 	p.queueBytes += pktSize
 	p.lock.Unlock()
+	return nil
 }
 
 func (p *PacerLeakyBucket) Stop() {
